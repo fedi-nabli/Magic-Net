@@ -46,16 +46,15 @@ struct magicnet_event
     int type;
     struct data
     {
-        union 
+        union
         {
             struct magicnet_event_type_block
             {
-                struct block* block;
-            } new_block_event;   
+                struct block *block;
+            } new_block_event;
         };
     } data;
 };
-
 
 struct magicnet_program
 {
@@ -215,7 +214,6 @@ struct magicnet_transactions_request
     int page;
 };
 
-
 struct magicnet_packet
 {
 
@@ -284,10 +282,9 @@ struct magicnet_packet
                     // The total events responded with
                     size_t total;
                     // A vector of struct magicnet_event*
-                    struct vector* events;
+                    struct vector *events;
                 } events_poll_res;
 
-    
                 struct sync
                 {
                     int flags;
@@ -473,7 +470,7 @@ struct magicnet_client
     // or a key being requested.
     // Any events pushed to a remote client will never be received by the remote client and will clog the vector forever.
     // This might change in the future.
-    struct vector* events;
+    struct vector *events;
 
     struct sockaddr_in client_info;
 
@@ -747,90 +744,159 @@ struct blockchain
     size_t proved_verified_blocks;
 };
 
-struct council_certificate_transfer_vote
+/**
+ * The network can have many councils registered
+ * applications that created a council are responsible for managing it.
+ */
+struct magicnet_council_certificate;
+struct magicnet_council
 {
-    struct council_certificate_transfer_vote_signed_data
+    struct magicnet_council_signed_data
     {
-        char vote_hash[SHA256_STRING_LENGTH];
-        struct council_certificate_transfer_vote_signed_data_payload
+        struct magicnet_council_id_signed_data
         {
-            char previous_vote_hash[SHA256_STRING_LENGTH];
-            struct key voter_key;
-            struct key vote_for_key;
-        } payload;
+            char name[MAGICNET_COUNCIL_NAME_LENGTH];
+            // You can never create more certificates for a council
+            // one certificate grants one council vote on decisions.
+            // Certificates once expired will be transfeered to a new person to join the council.
+            size_t total_certificates;
+
+            // The timestamp of when the council was created.
+            time_t creation_time;
+        } id_signed_data;
+
+        // The ID hash is used to identify the council
+        char id_hash[SHA256_STRING_LENGTH];
+
+        // This is an array of total_certificates and is the state the certificates
+        // first began existance in. It does not include transfer information from where certificates
+        // got transfeered to other peers.
+        // It contians only the very first initial state of the certificate.
+        struct magicnet_council_certificate *certificates;
     } signed_data;
 
-    // The signature signed by the voter key.
-    struct signature signature;
-};
-
-struct council_certificate_transfer
-{
-    struct council_certificate_transfer_signed_data
-    {
-        // The key of the old owner.
-        struct key old_owner;
-
-        // The key who this certificate will be transfeered too
-        // The new owner will be the most voted key in the transfer votes.
-        struct key new_owner;
-
-        time_t valid_from;
-        time_t expires_at;
-
-        // Theres obviously voters who vote on the new owner.
-        size_t total_voters;
-
-        // Voters are stored here each voter must be a valid council certificate. We ill check this before approving a transfer
-        // that we receive.
-        struct council_certificate_transfer_vote *voters;
-    } signed_data;
-
-    // This is the signing key that will confirm this transfer. It is best that the old owner signs this, that is the cherry on top
-    // If the old owner refuses then any one of the voters can sign that but it is always possible someone could conspire
-    // with a known signer, and ask them to sign. For this reason certificates that are broadcast around the network will be fact checked
-    // and if their is found to be a liar then rights can be removed.
+    // THe hash of the council signed data. Not to be used for identification.
+    // Seek id_hash for identification.
     char hash[SHA256_STRING_LENGTH];
-    struct key signing_key;
-    struct signature signature;
+
+    /**
+     * All certificates created by this council must start with the creator
+     * as the first owner
+     */
+    struct magicnet_council_creator
+    {
+        // Signed signature of the creator of the council.
+        struct signature signature;
+        // The public key of the creator of the council
+        struct key key;
+    } creator;
 };
 
 /**
- * To preform council actions you need a council license, each license is valid for 24 hours only
- * This is so we have a natural way of people losing power in the event an attack is made on newer clients who do not know
- * the true state of the blockchain yet.
+ *
+ * TODO:
+ *
+ * Some design concerns
+ * 1. What if someone on the council creates artifical transfer with himself as the only voter?
+ * 2. What if someone extracts only the votes that were for them, forges a certificate and signs it as if they was the block creator
+ *
+ * Solution is probably a linked list of votes where the signer of a vote has the previous vote as part of his signed data
+ * this would mean if someone took a single vote and put it in the votes table the old vote wouldnt be present
+ * which would show clear intention of fraud. It is still possible with that solution for someone to create an artifical transfer
+ * with himself as the only voter. This can be protected against by discarding all related blocks in the event we ever receive
+ * a certificate that shows the same transfer with a much higher vote count. We can then discard all works of the fraudulent certificate.
  */
-struct council_license
+
+struct council_certificate_transfer_vote_signed_data
 {
-    struct council_license_signed_data
-    {
-        // Certificate hash is signed. Licenses can only be issued to valid certificates. This is the certificate that owns the license
-        struct council_certificate *certificate;
-        // This is the certificate that signed this license, allowing it to exist.
-        struct council_certificate *signing_certificate;
-        time_t valid_from;
-        time_t expires_at;
-    } signed_data;
+    // THe hash of the certificate that we want to transfer.
+    char certificate_to_transfer_hash[SHA256_STRING_LENGTH];
+    
+    // The total voters who voted in the the transfer
+    size_t total_voters;
+    // The total voters who voted the same key as us
+    size_t total_for_vote;
+    // The total voters who voted against the key we voted for
+    size_t total_against_vote;
+    // The key you wish to vote to have the certificate transferred too.
+    struct key *new_owner_key;
 
-    char hash[SHA256_STRING_LENGTH];
-
-    // The key of the owner of the signing certificate.
-    struct key signing_key;
-    struct signature signature;
+    // The winning key is who we believed won the transfer
+    struct key *winning_key;
 };
 
-struct council_certificate
+struct council_certificate_transfer_vote
+{
+
+    // Data signed with the voter_key
+    struct council_certificate_transfer_vote_signed_data signed_data;
+
+    // The signature signed by the voter key.
+    struct signature signature;
+    struct key voter_key;
+};
+
+/**
+ * Transfers are only valid where all voters have signed the total voters, total who voted for the same key as them
+ * signed the total against them and finally who has signed who the winning key is. If the voters differ in opinion
+ * then the transfer is invalid thus the certificate issued is illegal.
+ */
+struct council_certificate_transfer
+{
+    // The certificate before a transfer took place
+    struct magicnet_council_certificate *certificate;
+
+    // The key who this certificate will be transfeered too
+    // The new owner will be the most voted key in the transfer votes.
+    struct key new_owner;
+
+    // The total voters who have voted for a transfer.
+    size_t total_voters;
+
+    // Voters are stored here each voter must be a valid council certificate. We ill check this before approving a transfer
+    // that we receive.
+    struct council_certificate_transfer_vote *voters;
+};
+
+enum
+{
+    // Set for a given certificate if it has never been transfeered before.
+    MAGICNET_COUNCIL_CERITFICATE_FLAG_GENESIS = 0b00000001
+};
+
+/**
+ * Council certificate data that is to be signed.
+ */
+struct council_certificate_signed_data
+{
+    // The Unique numerical certificate ID that is unique to the council only.
+    int id;
+
+    // Certificate flags.
+    int flags;
+
+    // The ID of the council this certificate belongs to.
+    char council_id_hash[SHA256_STRING_LENGTH];
+    // The timestamp of when this certificate will expires
+    time_t expires_at;
+
+    // The timestamp of when this certificate becomes valid.
+    time_t valid_from;
+
+    // The last certificate transfer of this certificate.
+    struct council_certificate_transfer transfer;
+};
+
+struct magicnet_council_certificate
 {
     // We have all the transfer history of the certificate here.
-    struct council_certificate_signed_data
-    {
-        size_t total_transfers;
-        struct council_certificate_transfer *transfers;
-    } signed_data;
+    struct council_certificate_signed_data signed_data;
 
-    // Should be the signing key of the last transfer who signed this certificate.
+    // Hash of the council certificate signed data.
     char hash[SHA256_STRING_LENGTH];
-    struct key signing_key;
+
+    // Should be signed by the owner of the certificate.
+    struct key owner_key;
     struct signature signature;
 };
 
@@ -842,10 +908,11 @@ struct block
     // Hash of the previous block
     char prev_hash[SHA256_STRING_LENGTH];
 
-    // Signed signature of the creator of the block
+    // Certificate used to sign the block
+    struct magicnet_council_certificate *certificate;
+
+    // The sigend signature of the block hash, signed with the certificate
     struct signature signature;
-    // The public key of the creator of the block.
-    struct key key;
 
     struct block_transaction_group *transaction_group;
 
@@ -950,7 +1017,6 @@ void magicnet_close(struct magicnet_client *client);
 
 void magicnet_reconnect(struct magicnet_program *program);
 
-
 void magicnet_event_release_data_for_event_type_new_block(struct magicnet_event *event);
 void magicnet_event_release_data(struct magicnet_event *event);
 void magicnet_event_release(struct magicnet_event *event);
@@ -960,16 +1026,16 @@ void magicnet_copy_event_data(struct magicnet_event *copy_to_event, struct magic
 struct magicnet_event *magicnet_copy_event(struct magicnet_event *original_event);
 struct vector *magicnet_copy_events(struct vector *events_vec_in);
 int _magicnet_events_poll(struct magicnet_program *program, bool reconnect_if_neccessary);
-int magicnet_event_make_for_block(struct magicnet_event** event_out, struct block* block);
+int magicnet_event_make_for_block(struct magicnet_event **event_out, struct block *block);
 int magicnet_events_poll(struct magicnet_program *program);
-size_t magicnet_client_total_known_events(struct magicnet_client* client);
-bool magicnet_client_has_known_events(struct magicnet_client* client);
-int magicnet_client_pop_event(struct magicnet_client* client, struct magicnet_event** event);
-int magicnet_client_push_event(struct magicnet_client* client, struct magicnet_event* event);
+size_t magicnet_client_total_known_events(struct magicnet_client *client);
+bool magicnet_client_has_known_events(struct magicnet_client *client);
+int magicnet_client_pop_event(struct magicnet_client *client, struct magicnet_event **event);
+int magicnet_client_push_event(struct magicnet_client *client, struct magicnet_event *event);
 bool magicnet_has_queued_events(struct magicnet_program *program);
 struct magicnet_event *magicnet_next_event(struct magicnet_program *program);
 void magicnet_events_vector_free(struct vector *events_vec);
-void magicnet_events_vector_clone_events_and_push(struct vector* events_from, struct vector* events_to);
+void magicnet_events_vector_clone_events_and_push(struct vector *events_from, struct vector *events_to);
 
 int magicnet_client_connection_type(struct magicnet_client *client);
 struct magicnet_client *magicnet_connect_again(struct magicnet_client *client, const char *program_name);
@@ -1025,7 +1091,6 @@ int magicnet_flags();
 int magicnet_get_structure(int type, struct magicnet_registered_structure *struct_out);
 int magicnet_register_structure(long type, size_t size);
 struct magicnet_program *magicnet_program(const char *name);
-
 
 /**
  * Makes a money transfer to the recipient
@@ -1125,6 +1190,27 @@ int block_hash_sign_verify(struct block *block);
 void magicnet_get_block_path(struct block *block, char *block_path_out);
 const char *block_hash_create(struct block *block, char *hash_out);
 struct block *magicnet_block_load(const char *hash);
+
+// Council
+int magicnet_council_init();
+struct magicnet_council *magicnet_council_create(const char *name, size_t total_certificates, time_t creation_time);
+void magicnet_council_free(struct magicnet_council *council);
+
+void magicnet_council_certificate_free(struct magicnet_council_certificate *certificate);
+int magicnet_council_certificate_verify_signature(struct magicnet_council_certificate *certificate);
+void magicnet_council_certificate_hash(struct magicnet_council_certificate *certificate, char *out_hash);
+
+/**
+ * Will attempt to give you a certificate belonging to the provided public key and the council,
+ * if multiple certificates belonging to the public key that are heldby the council
+ * are found then the most valid certificate will be returned. Valid being the one that is in date and not expired.
+ */
+struct magicnet_council_certificate *magicnet_council_certificate_load(const char *pub_key, const char *council_id_hash);
+
+struct magicnet_council_certificate *magicnet_council_certificate_clone(struct magicnet_council_certificate *certificate);
+int magicnet_council_certificate_verify(struct magicnet_council_certificate *certificate);
+
+// End of council
 
 // Blockchain downloader
 struct magicnet_chain_downloader *magicnet_chain_downloader_download(struct magicnet_server *server);

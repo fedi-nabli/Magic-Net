@@ -104,6 +104,7 @@ int main(int argc, char **argv)
         return res;
     }
 
+
     server = magicnet_server_start(MAGICNET_SERVER_PORT);
     if (!server)
     {
@@ -137,6 +138,9 @@ int main(int argc, char **argv)
     {
         printf("Wallet balance=%f\n", test_wallet->balance);
     }
+
+
+
     // Accept the clients
     bool server_shutdown = false;
     while (!server_shutdown)

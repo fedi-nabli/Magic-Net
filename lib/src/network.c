@@ -352,6 +352,19 @@ bool magicnet_client_in_use(struct magicnet_client *client)
     return client->flags & MAGICNET_CLIENT_FLAG_CONNECTED;
 }
 
+size_t magicnet_client_seconds_since_last_contact(struct magicnet_client *client)
+{
+    return time(NULL) - client->last_contact;
+}
+
+/**
+ * Returns true if we haven't received any data from this client in a while
+ */
+bool magicnet_client_inactive(struct magicnet_client *client)
+{
+    return magicnet_client_seconds_since_last_contact(client) > MAGICNET_CLIENT_TIMEOUT_SECONDS;
+}
+
 struct magicnet_client *magicnet_find_free_client(struct magicnet_server *server)
 {
     for (int i = 0; i < MAGICNET_MAX_INCOMING_CONNECTIONS; i++)
@@ -516,6 +529,7 @@ int magicnet_server_next_block_transaction_add(struct magicnet_server *server, s
     if (magicnet_server_next_block_transaction_exists(server, transaction))
     {
         res = MAGICNET_ERROR_ALREADY_EXISTANT;
+        magicnet_log("%s already existant, possibly a loop back via localhost might not have to worry\n", __FUNCTION__);
         goto out;
     }
 
@@ -523,6 +537,7 @@ int magicnet_server_next_block_transaction_add(struct magicnet_server *server, s
     // the clone will be deleted when the block sequence completes
     struct block_transaction *cloned_transaction = block_transaction_clone(transaction);
     vector_push(server->next_block.block_transactions, &cloned_transaction);
+    magicnet_log("%s added to transaction queue\n", __FUNCTION__);
 out:
     return res;
 }
@@ -1012,7 +1027,7 @@ int magicnet_read_bytes(struct magicnet_client *client, void *ptr_out, size_t am
     size_t amount_read = 0;
     while (amount_read < amount)
     {
-        res = recv(client->sock, ptr_out + amount_read, amount - amount_read, MSG_WAITALL);
+        res = recv(client->sock, ptr_out + amount_read, amount - amount_read, 0);
         if (res <= 0)
         {
             res = -1;
@@ -1426,6 +1441,181 @@ int magicnet_read_transaction(struct magicnet_client *client, struct block_trans
             magicnet_log("%s the transaction sent to us is invalid\n", __FUNCTION__);
             goto out;
         }
+    }
+
+out:
+    return res;
+}
+
+int magicnet_client_read_council_certificate(struct magicnet_client *client, struct magicnet_council_certificate *certificate_out, struct buffer *write_buf);
+
+int magicnet_client_read_council_certificate_transfer_vote_signed_data(struct magicnet_client *client, struct council_certificate_transfer_vote_signed_data *signed_data, struct buffer *write_buf)
+{
+    int res = 0;
+
+    res = magicnet_read_bytes(client, signed_data->certificate_to_transfer_hash, sizeof(signed_data->certificate_to_transfer_hash), write_buf);
+    if (res < 0)
+    {
+        goto out;
+    }
+
+
+    signed_data->total_voters = magicnet_read_long(client, write_buf);
+    if (signed_data->total_voters < 0)
+    {
+        res = signed_data->total_voters;
+        goto out;
+    }
+
+    signed_data->total_for_vote = magicnet_read_long(client, write_buf);
+    if (signed_data->total_for_vote < 0)
+    {
+        res = signed_data->total_for_vote;
+        goto out;
+    }
+
+    signed_data->total_against_vote = magicnet_read_long(client, write_buf);
+    if (signed_data->total_against_vote < 0)
+    {
+        res = signed_data->total_against_vote;
+        goto out;
+    }
+
+    res = magicnet_read_bytes(client, &signed_data->new_owner_key, sizeof(signed_data->new_owner_key), write_buf);
+    if (res < 0)
+    {
+        goto out;
+    }
+    res = magicnet_read_bytes(client, &signed_data->winning_key, sizeof(signed_data->winning_key), write_buf);
+    if (res < 0)
+    {
+        goto out;
+    }
+
+out:
+    return res;
+}
+
+int magicnet_client_read_council_certificate_transfer_vote(struct magicnet_client *client, struct council_certificate_transfer_vote *transfer_vote, struct buffer *write_buf)
+{
+    int res = 0;
+    res = magicnet_read_bytes(client, &transfer_vote->signature, sizeof(transfer_vote->signature), write_buf);
+    if (res < 0)
+    {
+        goto out;
+    }
+
+    res = magicnet_read_bytes(client, &transfer_vote->voter_key, sizeof(transfer_vote->voter_key), write_buf);
+    if (res < 0)
+    {
+        goto out;
+    }
+
+out:
+    return res;
+}
+int magicnet_client_read_council_certificate_transfer(struct magicnet_client *client, struct council_certificate_transfer *transfer, struct buffer *write_buf)
+{
+    int res = 0;
+    res = magicnet_client_read_council_certificate(client, transfer->certificate, write_buf);
+    if (res < 0)
+    {
+        goto out;
+    }
+
+    res = magicnet_read_bytes(client, &transfer->new_owner, sizeof(transfer->new_owner), write_buf);
+    if (res < 0)
+    {
+        goto out;
+    }
+
+    res = magicnet_read_int(client, write_buf);
+    if (res < 0)
+    {
+        goto out;
+    }
+
+    transfer->total_voters = res;
+
+out:
+    return res;
+}
+
+int magicnet_client_read_council_certificate_signed_data(struct magicnet_client *client, struct council_certificate_signed_data *signed_data, struct buffer *write_buf)
+{
+    int res = 0;
+    signed_data->id = magicnet_read_int(client, write_buf);
+    if (signed_data->id < 0)
+    {
+        res = signed_data->id;
+        goto out;
+    }
+
+    signed_data->flags = magicnet_read_int(client, write_buf);
+    if (signed_data->flags < 0)
+    {
+        res = signed_data->flags;
+        goto out;
+    }
+
+    res = magicnet_read_bytes(client, signed_data->council_id_hash, sizeof(signed_data->council_id_hash), write_buf);
+    if (res < 0)
+    {
+        goto out;
+    }
+
+    signed_data->expires_at = magicnet_read_long(client, write_buf);
+    if (signed_data->expires_at < 0)
+    {
+        res = (int)signed_data->expires_at;
+        goto out;
+    }
+
+    signed_data->valid_from = magicnet_read_long(client, write_buf);
+    if (signed_data->valid_from < 0)
+    {
+        res = (int)signed_data->valid_from;
+        goto out;
+    }
+
+    res = magicnet_client_read_council_certificate_transfer(client, &signed_data->transfer, write_buf);
+    if (res < 0)
+    {
+        goto out;
+    }
+
+out:
+    return res;
+}
+int magicnet_client_read_council_certificate(struct magicnet_client *client, struct magicnet_council_certificate *certificate_out, struct buffer *write_buf)
+{
+    int res = 0;
+    res = magicnet_read_bytes(client, certificate_out->hash, sizeof(certificate_out->hash), write_buf);
+    if (res < 0)
+    {
+        magicnet_log("%s error reading hash of council certificate", __FUNCTION__);
+        goto out;
+    }
+
+    res = magicnet_read_bytes(client, &certificate_out->owner_key, sizeof(certificate_out->owner_key), write_buf);
+    if (res < 0)
+    {
+        magicnet_log("%s failed to read owner key\n", __FUNCTION__);
+        goto out;
+    }
+
+    res = magicnet_read_bytes(client, &certificate_out->signature, sizeof(certificate_out->signature), write_buf);
+    if (res < 0)
+    {
+        magicnet_log("%s failed to read the signature", __FUNCTION__);
+        goto out;
+    }
+
+    res = magicnet_client_read_council_certificate_signed_data(client, &certificate_out->signed_data, write_buf);
+    if (res < 0)
+    {
+        magicnet_log("%s failed to read certificate signed data", __FUNCTION__);
+        goto out;
     }
 
 out:
@@ -1956,6 +2146,7 @@ int magicnet_client_read_packet(struct magicnet_client *client, struct magicnet_
     packet_id = magicnet_read_int(client, packet_out->not_sent.tmp_buf);
     if (packet_id < 0)
     {
+        res = packet_id;
         goto out;
     }
 
@@ -3887,6 +4078,7 @@ int magicnet_client_manage_next_packet(struct magicnet_client *client)
     if (!packet)
     {
         magicnet_log("%s failed to receive new packet from client\n", __FUNCTION__);
+        res = MAGICNET_ERROR_CRITICAL_ERROR;
         goto out;
     }
 
@@ -4777,6 +4969,9 @@ out:
     return res;
 }
 
+/**
+ * Only called by clients that connected to a server, not called by server at all.
+ */
 int magicnet_server_poll_process(struct magicnet_client *client, struct magicnet_packet *packet)
 {
     int res = 0;
@@ -4826,6 +5021,10 @@ int magicnet_server_poll_process(struct magicnet_client *client, struct magicnet
 
     return res;
 }
+
+/**
+ * Called if your a client that connected to another peer, you call it to sync with it.
+ */
 int magicnet_server_poll(struct magicnet_client *client)
 {
     int res = 0;
@@ -5382,6 +5581,9 @@ out:
     magicnet_free_packet(packet);
 }
 
+size_t magicnet_server_total_waiting_transactions_to_send(struct magicnet_server *server)
+{
+}
 bool magicnet_server_should_sign_and_send_self_transaction(struct self_block_transaction *self_transaction)
 {
     // We do still allow you to resend even if its been sent before.
@@ -5595,6 +5797,7 @@ bool magicnet_server_alive_for_at_least_one_block_cycle(struct magicnet_server *
 int magicnet_server_process(struct magicnet_server *server)
 {
     int res = 0;
+
     if (magicnet_server_should_make_new_connections(server))
     {
         magicnet_server_attempt_new_connections(server);
