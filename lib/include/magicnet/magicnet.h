@@ -142,6 +142,7 @@ enum
     MAGICNET_ERROR_INVALID_PARAMETERS = -1008,
     MAGICNET_ERROR_END_OF_STREAM = -1009,
     MAGICNET_DATA_SENT_BEFORE = -1010,
+    MAGICNET_ERROR_OUT_OF_BOUNDS = -1011,
 
     // Critical errors will terminate connections when received be cautious..
     // You may not send a critical error over the network it will be ignored and changed to an unknown error
@@ -744,6 +745,12 @@ struct blockchain
     size_t proved_verified_blocks;
 };
 
+
+enum
+{
+    MAGICNET_COUNCIL_MEMORY_FLAG_COUNCIL_WAS_VERIFIED = 0b00000001,
+};
+
 /**
  * The network can have many councils registered
  * applications that created a council are responsible for managing it.
@@ -790,6 +797,11 @@ struct magicnet_council
         // The public key of the creator of the council
         struct key key;
     } creator;
+
+
+    // Flags used to determine states of the loaded council.
+    // The flags are not saved or transfeered over the network
+    int memory_flags;
 };
 
 /**
@@ -809,20 +821,27 @@ struct magicnet_council
 
 struct council_certificate_transfer_vote_signed_data
 {
-    // THe hash of the certificate that we want to transfer.
+    // The hash of the certificate that we want to transfer.
     char certificate_to_transfer_hash[SHA256_STRING_LENGTH];
-    
+
     // The total voters who voted in the the transfer
     size_t total_voters;
     // The total voters who voted the same key as us
     size_t total_for_vote;
     // The total voters who voted against the key we voted for
     size_t total_against_vote;
+
+    // The timestamp of when the new certificate will expire
+    time_t certificate_expires_at;
+
+    // The timestamp of when this certificate becomes valid.
+    time_t certificate_valid_from;
+
     // The key you wish to vote to have the certificate transferred too.
-    struct key *new_owner_key;
+    struct key new_owner_key;
 
     // The winning key is who we believed won the transfer
-    struct key *winning_key;
+    struct key winning_key;
 };
 
 struct council_certificate_transfer_vote
@@ -830,10 +849,15 @@ struct council_certificate_transfer_vote
 
     // Data signed with the voter_key
     struct council_certificate_transfer_vote_signed_data signed_data;
+    
+    // The hash of the signed data
+    char hash[SHA256_STRING_LENGTH];
 
-    // The signature signed by the voter key.
+    // The signature of the hash signed by the voter certificate key.
     struct signature signature;
-    struct key voter_key;
+
+    // The certificate who voted
+    struct magicnet_council_certificate *voter_certificate;
 };
 
 /**
@@ -861,7 +885,15 @@ struct council_certificate_transfer
 enum
 {
     // Set for a given certificate if it has never been transfeered before.
-    MAGICNET_COUNCIL_CERITFICATE_FLAG_GENESIS = 0b00000001
+    MAGICNET_COUNCIL_CERITFICATE_FLAG_GENESIS = 0b00000001,
+
+    // In some cases council members may want the power to transfer certificates without the need for a vote
+    // this is possible if the certificate has the transferable without vote flag set.
+    // With this flag set the owner of the certificate can transfer it to anybody without the need for a vote.
+    // In practice for security reasons the flag should rarely be used, the only valid use case that I can think of 
+    // is in the case of a genesis certificate and in such cases we need to allocate certificates to many people quickly
+    // to avoid voting delays from parties who are not truly interested in maintaining the network this flag could be crucial.
+    MAGICNET_COUNCIL_CERTIFICATE_FLAG_TRANSFERABLE_WITHOUT_VOTE = 0b00000010,
 };
 
 /**
@@ -887,6 +919,12 @@ struct council_certificate_signed_data
     struct council_certificate_transfer transfer;
 };
 
+enum
+{
+    // When set siginifies that a council certificate has already been verified before.
+    MAGICNET_COUNCIL_CERTIFICATE_MEMORY_FLAG_VERIFIED = 0b00000001,
+};
+
 struct magicnet_council_certificate
 {
     // We have all the transfer history of the certificate here.
@@ -898,6 +936,15 @@ struct magicnet_council_certificate
     // Should be signed by the owner of the certificate.
     struct key owner_key;
     struct signature signature;
+
+    // The council this certificate belongs too, this is NULL if the council isnt currently loaded or located
+    // in which case you must rely on the signed_data.council_id_hash to locate and load the council.
+    struct magicnet_council* council;
+
+
+    // Memory flags for this certificate, that are not saved or sent over the network and are purley used as a way of storing
+    // runtime data for this certificate
+    int memory_flags;
 };
 
 struct block
@@ -1195,20 +1242,42 @@ struct block *magicnet_block_load(const char *hash);
 int magicnet_council_init();
 struct magicnet_council *magicnet_council_create(const char *name, size_t total_certificates, time_t creation_time);
 void magicnet_council_free(struct magicnet_council *council);
+int magicnet_council_save(struct magicnet_council *council);
+int magicnet_council_verify(struct magicnet_council *council);
 
+
+/**
+ * Verifies that a given council certificate signed a particular hash.
+*/
+int magicnet_council_certificate_verify_signed_data(struct magicnet_council_certificate *certificate, struct signature* signature, const char* hash);
+
+/**
+ * Verifies that the council certificate is valid
+ * 
+ * \param certificate The certificate to verify
+*/
+int magicnet_council_certificate_verify(struct magicnet_council_certificate *certificate);
+
+struct magicnet_council_certificate *magicnet_council_certificate_create();
+struct magicnet_council_certificate *magicnet_council_certificate_create_many(size_t total);
+
+void magicnet_council_certificate_many_free(struct magicnet_council_certificate* certificates_ptr, size_t amount);
 void magicnet_council_certificate_free(struct magicnet_council_certificate *certificate);
 int magicnet_council_certificate_verify_signature(struct magicnet_council_certificate *certificate);
 void magicnet_council_certificate_hash(struct magicnet_council_certificate *certificate, char *out_hash);
 
 /**
+ * Returns true if the given certificate is a genesis certificate belonging to the council
+*/
+bool magicnet_council_is_genesis_certificate(struct magicnet_council* council, struct magicnet_council_certificate* certificate);
+/**
  * Will attempt to give you a certificate belonging to the provided public key and the council,
  * if multiple certificates belonging to the public key that are heldby the council
  * are found then the most valid certificate will be returned. Valid being the one that is in date and not expired.
  */
-struct magicnet_council_certificate *magicnet_council_certificate_load(const char *pub_key, const char *council_id_hash);
+struct magicnet_council_certificate *magicnet_council_certificate_load(const char *certificate_hash);
 
 struct magicnet_council_certificate *magicnet_council_certificate_clone(struct magicnet_council_certificate *certificate);
-int magicnet_council_certificate_verify(struct magicnet_council_certificate *certificate);
 
 // End of council
 
