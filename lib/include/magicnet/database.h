@@ -3,10 +3,15 @@
 #include "magicnet.h"
 #include "key.h"
 #include <time.h>
-int magicnet_database_load_block_no_locks(const char *hash, char *prev_hash_out, int *blockchain_id, char *transaction_group_hash, struct key* key, struct signature* signature, time_t* created_at);
-int magicnet_database_load_block(const char *hash, char *prev_hash_out, int *blockchain_id, char *transaction_group_hash, struct key* key, struct signature* signature, time_t* created_at);
-int magicnet_database_load_block_from_previous_hash(const char* prev_hash, char *hash_out, int *blockchain_id, char *transaction_group_hash, time_t* created_time);
-int magicnet_database_load_block_from_previous_hash_no_locks(const char* prev_hash, char *hash_out, int *blockchain_id, char *transaction_group_hash, time_t* created_time);
+
+// Settings
+int magicnet_database_setting_get(const char *key, char *value_out);
+int magicnet_database_setting_set(const char *key, const char *value);
+
+int magicnet_database_load_block_no_locks(const char *hash, char *prev_hash_out, int *blockchain_id, char *transaction_group_hash, char* signing_certificate_hash, struct signature* signature, time_t* created_at);
+int magicnet_database_load_block(const char *hash, char *prev_hash_out, int *blockchain_id, char *transaction_group_hash, char* signing_certificate_hash, struct signature *signature, time_t *created_time);
+int magicnet_database_load_block_from_previous_hash(const char* prev_hash, char *hash_out, int *blockchain_id, char *transaction_group_hash, char* signing_certificate_hash, time_t* created_time);
+int magicnet_database_load_block_from_previous_hash_no_locks(const char* prev_hash, char *hash_out, int *blockchain_id, char *transaction_group_hash, char* signing_certificate_hash, time_t* created_time);
 int magicnet_database_load_block_transaction(const char *transaction_hash, struct block_transaction** transaction_out);
 int magicnet_database_load_block_transaction_no_locks(const char *transaction_hash, struct block_transaction** transaction_out);
 int magicnet_database_load_transactions(struct magicnet_transactions_request *transactions_request, struct block_transaction_group* transaction_group);
@@ -55,10 +60,14 @@ int magicnet_database_load_council(const char *id_hash, struct magicnet_council 
 int magicnet_database_write_council(const struct magicnet_council *council_in);
 // Certificates
 int magicnet_database_write_certificate_no_locks(struct magicnet_council_certificate *certificate_in);
+int magicnet_database_write_certificate(struct magicnet_council_certificate *certificate_in);
+
 int magicnet_database_load_transfer_no_locks(struct council_certificate_transfer *certificate_transfer_out, int local_id);
+int magicnet_database_load_certificate(struct magicnet_council_certificate *certificate_out, const char *certificate_hash);
 int magicnet_database_load_certificate_no_locks(struct magicnet_council_certificate *certificate_out, const char *certificate_hash);
 int magicnet_database_load_council_certificates_no_locks(const char* council_id_hash, struct magicnet_council_certificate* certificates, size_t max_certificates);
 
 void magicnet_database_close();
+
 
 #endif

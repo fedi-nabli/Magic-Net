@@ -109,6 +109,7 @@ const char *create_tables[] = {
                                                          \"active\"	INTEGER,        \
                                                         PRIMARY KEY(\"pub_key\") \
                             );",
+
     "CREATE TABLE \"peers\" ( \
                                 \"id\"	INTEGER,        \
                                 \"ip_address\"	TEXT,   \
@@ -123,19 +124,160 @@ const char *create_tables[] = {
     // that will be used to prevent the server from
     // connecting to them.
     "CREATE TABLE \"banned_peers\" ( \
-                                \"id\"	INTEGER,        \
-                                \"ip_address\"	TEXT,   \
-                                \"key\"	BLOB,           \
-                                \"added_at\"	INTEGER, \
-                                \"banned_until\"	INTEGER, \
-                                PRIMARY KEY(\"id\" AUTOINCREMENT)",
+    \"id\"    INTEGER,        \
+    \"ip_address\" TEXT,   \
+    \"key\"   BLOB,           \
+    \"added_at\" INTEGER, \
+    \"banned_until\" INTEGER, \
+    PRIMARY KEY(\"id\" AUTOINCREMENT)\
+);",
+
+    "CREATE TABLE \"settings\" (    \
+	\"id\"	INTEGER,    \
+	\"key\"	TEXT,   \
+	\"value\"	TEXT,   \
+    PRIMARY KEY(\"id\") \
+    );",
     NULL};
 
 const char *magicnet_database_path()
 {
     static char filepath[PATH_MAX];
+
+    sprintf(filepath, "./%s", MAGICNET_DATABASE_SQLITE_FILEPATH);
+
+    // First check for a local path if it exists we will use that one
+    if (file_exists(filepath))
+    {
+        return filepath;
+    }
+
+    memset(filepath, 0, sizeof(filepath));
     sprintf(filepath, "%s/%s%s", getenv(MAGICNET_DATA_BASE_DIRECTORY_ENV), MAGICNET_DATA_BASE, MAGICNET_DATABASE_SQLITE_FILEPATH);
     return filepath;
+}
+
+int magicnet_database_setting_set_create_no_locks(const char *key, const char *value)
+{
+    int res = 0;
+    sqlite3_stmt *stmt = NULL;
+    const char *insert_setting_sql = "INSERT INTO settings (key, value) VALUES (?, ?);";
+    res = sqlite3_prepare_v2(db, insert_setting_sql, strlen(insert_setting_sql), &stmt, 0);
+    if (res != SQLITE_OK)
+    {
+        goto out;
+    }
+    sqlite3_bind_text(stmt, 1, key, strlen(key), NULL);
+    sqlite3_bind_text(stmt, 2, value, strlen(value), NULL);
+    int step = sqlite3_step(stmt);
+    if (step != SQLITE_DONE)
+    {
+        res = -1;
+        goto out;
+    }
+out:
+    sqlite3_finalize(stmt);
+    return res;
+}
+
+int magicnet_database_setting_set_update_no_locks(const char *key, const char *value)
+{
+    int res = 0;
+    sqlite3_stmt *stmt = NULL;
+    const char *update_setting_sql = "UPDATE settings SET value=? WHERE key=?;";
+    res = sqlite3_prepare_v2(db, update_setting_sql, strlen(update_setting_sql), &stmt, 0);
+    if (res != SQLITE_OK)
+    {
+        goto out;
+    }
+    sqlite3_bind_text(stmt, 1, value, strlen(value), NULL);
+    sqlite3_bind_text(stmt, 2, key, strlen(key), NULL);
+    int step = sqlite3_step(stmt);
+    if (step != SQLITE_DONE)
+    {
+        res = -1;
+        goto out;
+    }
+out:
+    sqlite3_finalize(stmt);
+    return res;
+}
+
+int magicnet_database_setting_set(const char *key, const char *value)
+{
+    int res = 0;
+    sqlite3_stmt *stmt = NULL;
+    pthread_mutex_lock(&db_lock);
+    if (strlen(value) > MAGICNET_MAX_SETTING_VALUE_SIZE)
+    {
+        magicnet_log("%s The setting value is too large\n", __FUNCTION__);
+        res = -1;
+        goto out;
+    }
+
+    // Check if the key exists if it does update it otherwise create it
+    const char *get_setting_sql = "SELECT id FROM settings WHERE key=?;";
+    res = sqlite3_prepare_v2(db, get_setting_sql, strlen(get_setting_sql), &stmt, 0);
+    if (res != SQLITE_OK)
+    {
+        goto out;
+    }
+    sqlite3_bind_text(stmt, 1, key, strlen(key), NULL);
+
+    int step = sqlite3_step(stmt);
+    if (step == SQLITE_ROW)
+    {
+        res = magicnet_database_setting_set_update_no_locks(key, value);
+        if (res < 0)
+        {
+            goto out;
+        }
+    }
+    else
+    {
+        res = magicnet_database_setting_set_create_no_locks(key, value);
+        if (res < 0)
+        {
+            goto out;
+        }
+    }
+
+out:
+    sqlite3_finalize(stmt);
+    pthread_mutex_unlock(&db_lock);
+    return res;
+}
+
+int magicnet_database_setting_get(const char *key, char *value_out)
+{
+    int res = 0;
+    sqlite3_stmt *stmt = NULL;
+    pthread_mutex_lock(&db_lock);
+
+    const char *get_setting_sql = "SELECT value FROM settings WHERE key=?;";
+    res = sqlite3_prepare_v2(db, get_setting_sql, strlen(get_setting_sql), &stmt, 0);
+    if (res != SQLITE_OK)
+    {
+        goto out;
+    }
+    sqlite3_bind_text(stmt, 1, key, strlen(key), NULL);
+
+    int step = sqlite3_step(stmt);
+    if (step != SQLITE_ROW)
+    {
+        res = -1;
+        goto out;
+    }
+
+    if (value_out)
+    {
+        strncpy(value_out, sqlite3_column_text(stmt, 0), MAGICNET_MAX_SETTING_VALUE_SIZE);
+    }
+
+out:
+    sqlite3_finalize(stmt);
+    pthread_mutex_unlock(&db_lock);
+    return res;
 }
 
 int magicnet_database_peer_add_no_locks(const char *ip_address, struct key *key, const char *name, const char *email)
@@ -458,6 +600,9 @@ int magicnet_database_load()
         {
             goto out;
         }
+
+        // Set the first ever runtime.
+        magicnet_setting_set_timestamp("first_run", time(NULL));
     }
 
     if (pthread_mutex_init(&db_lock, NULL) != 0)
@@ -1075,20 +1220,20 @@ int magicnet_database_load_last_block(char *hash_out, char *prev_hash_out)
     return res;
 }
 
-int magicnet_database_load_block_from_previous_hash(const char *prev_hash, char *hash_out, int *blockchain_id, char *transaction_group_hash, time_t *created_time)
+int magicnet_database_load_block_from_previous_hash(const char *prev_hash, char *hash_out, int *blockchain_id, char *transaction_group_hash, char *signing_certificate_hash, time_t *created_time)
 {
     int res = 0;
     pthread_mutex_lock(&db_lock);
-    res = magicnet_database_load_block_from_previous_hash_no_locks(prev_hash, hash_out, blockchain_id, transaction_group_hash, created_time);
+    res = magicnet_database_load_block_from_previous_hash_no_locks(prev_hash, hash_out, blockchain_id, transaction_group_hash, signing_certificate_hash, created_time);
     pthread_mutex_unlock(&db_lock);
     return res;
 }
 
-int magicnet_database_load_block_from_previous_hash_no_locks(const char *prev_hash, char *hash_out, int *blockchain_id, char *transaction_group_hash, time_t *created_time)
+int magicnet_database_load_block_from_previous_hash_no_locks(const char *prev_hash, char *hash_out, int *blockchain_id, char *transaction_group_hash, char *signing_certificate_hash, time_t *created_time)
 {
     int res = 0;
     sqlite3_stmt *stmt = NULL;
-    const char *load_block_sql = "SELECT hash, blockchain_id, transaction_group_hash, time_created FROM blocks WHERE prev_hash = ?";
+    const char *load_block_sql = "SELECT hash, blockchain_id, transaction_group_hash, signing_certificate_hash, time_created FROM blocks WHERE prev_hash = ?";
     res = sqlite3_prepare_v2(db, load_block_sql, strlen(load_block_sql), &stmt, 0);
     if (res != SQLITE_OK)
     {
@@ -1123,9 +1268,18 @@ int magicnet_database_load_block_from_previous_hash_no_locks(const char *prev_ha
         }
     }
 
+    if (signing_certificate_hash)
+    {
+        bzero(transaction_group_hash, SHA256_STRING_LENGTH);
+        if (sqlite3_column_text(stmt, 3))
+        {
+            strncpy(transaction_group_hash, sqlite3_column_text(stmt, 3), SHA256_STRING_LENGTH);
+        }
+    }
+
     if (created_time)
     {
-        *created_time = sqlite3_column_int(stmt, 3);
+        *created_time = sqlite3_column_int(stmt, 4);
     }
 out:
     if (stmt)
@@ -1373,20 +1527,20 @@ int magicnet_database_load_block_transactions(struct block *block)
     return res;
 }
 
-int magicnet_database_load_block(const char *hash, char *prev_hash_out, int *blockchain_id, char *transaction_group_hash, struct key *key, struct signature *signature, time_t *created_time)
+int magicnet_database_load_block(const char *hash, char *prev_hash_out, int *blockchain_id, char *transaction_group_hash, char *signing_certificate_hash, struct signature *signature, time_t *created_time)
 {
     int res = 0;
     pthread_mutex_lock(&db_lock);
-    res = magicnet_database_load_block_no_locks(hash, prev_hash_out, blockchain_id, transaction_group_hash, key, signature, created_time);
+    res = magicnet_database_load_block_no_locks(hash, prev_hash_out, blockchain_id, transaction_group_hash, signing_certificate_hash, signature, created_time);
     pthread_mutex_unlock(&db_lock);
     return res;
 }
 
-int magicnet_database_load_block_no_locks(const char *hash, char *prev_hash_out, int *blockchain_id, char *transaction_group_hash, struct key *key, struct signature *signature, time_t *created_time)
+int magicnet_database_load_block_no_locks(const char *hash, char *prev_hash_out, int *blockchain_id, char *transaction_group_hash, char *signing_certificate_hash, struct signature *signature, time_t *created_time)
 {
     int res = 0;
     sqlite3_stmt *stmt = NULL;
-    const char *load_block_sql = "SELECT prev_hash, blockchain_id, transaction_group_hash, key, signature, time_created FROM blocks WHERE hash = ?";
+    const char *load_block_sql = "SELECT prev_hash, blockchain_id, transaction_group_hash, signing_certificate_hash, signature, time_created FROM blocks WHERE hash = ?";
     res = sqlite3_prepare_v2(db, load_block_sql, strlen(load_block_sql), &stmt, 0);
     if (res != SQLITE_OK)
     {
@@ -1422,13 +1576,15 @@ int magicnet_database_load_block_no_locks(const char *hash, char *prev_hash_out,
         }
     }
 
-    if (key)
+    if (signing_certificate_hash)
     {
-        if (sqlite3_column_blob(stmt, 3))
+        bzero(signing_certificate_hash, SHA256_STRING_LENGTH);
+        if (sqlite3_column_text(stmt, 3))
         {
-            memcpy(key, sqlite3_column_blob(stmt, 3), sizeof(struct key));
+            strncpy(signing_certificate_hash, sqlite3_column_text(stmt, 3), SHA256_STRING_LENGTH);
         }
     }
+
 
     if (signature)
     {
@@ -1636,6 +1792,9 @@ out:
 
 int magicnet_database_load_certificate_no_locks(struct magicnet_council_certificate *certificate_out, const char *certificate_hash);
 
+/**
+ * Loads the initial council certificates that existed upon council creation.
+ */
 int magicnet_database_load_council_certificates_no_locks(const char *council_id_hash, struct magicnet_council_certificate *certificates, size_t max_certificates)
 {
 
@@ -1653,7 +1812,9 @@ int magicnet_database_load_council_certificates_no_locks(const char *council_id_
     int res = 0;
 
     sqlite3_stmt *stmt = NULL;
-    const char *load_block_sql = "SELECT hash FROM council_certificates WHERE council_id_hash = ?";
+
+    // Where the council hash is equal to the provided hash and the MAGICNET_COUNCIL_CERITFICATE_FLAG_GENESIS flag is set
+    const char *load_block_sql = "SELECT hash FROM council_certificates WHERE council_id_hash = ? AND (flags & ?) = ?";
     res = sqlite3_prepare_v2(db, load_block_sql, strlen(load_block_sql), &stmt, 0);
     if (res != SQLITE_OK)
     {
@@ -1661,6 +1822,9 @@ int magicnet_database_load_council_certificates_no_locks(const char *council_id_
     }
 
     sqlite3_bind_text(stmt, 1, council_id_hash, strlen(council_id_hash), NULL);
+    sqlite3_bind_int(stmt, 2, MAGICNET_COUNCIL_CERITFICATE_FLAG_GENESIS);
+    sqlite3_bind_int(stmt, 3, MAGICNET_COUNCIL_CERITFICATE_FLAG_GENESIS);
+
     int step = sqlite3_step(stmt);
     size_t i = 0;
     while (step == SQLITE_ROW)
@@ -1733,9 +1897,9 @@ int magicnet_database_load_council_no_locks(const char *id_hash, struct magicnet
     // Set all the council certificates to point to this council
     for (size_t i = 0; i < council_out->signed_data.id_signed_data.total_certificates; i++)
     {
-       council_out->signed_data.certificates[i].council = council_out;
+        council_out->signed_data.certificates[i].council = council_out;
     }
-    
+
     memcpy(council_out->hash, sqlite3_column_text(stmt, 5), sizeof(council_out->hash));
     memcpy(&council_out->creator.signature, sqlite3_column_blob(stmt, 6), sizeof(council_out->creator.signature));
     council_out->creator.key = MAGICNET_key_from_string(sqlite3_column_text(stmt, 7));
@@ -2042,11 +2206,15 @@ int magicnet_database_load_transfer_no_locks(struct council_certificate_transfer
         res = MAGICNET_ERROR_NOT_FOUND;
         goto out;
     }
-    certificate_transfer_out->certificate = magicnet_council_certificate_create();
-    res = magicnet_database_load_certificate_no_locks(certificate_transfer_out->certificate, sqlite3_column_text(stmt, 1));
-    if (res < 0)
+
+    if (sqlite3_column_text(stmt, 1))
     {
-        goto out;
+        certificate_transfer_out->certificate = magicnet_council_certificate_create();
+        res = magicnet_database_load_certificate_no_locks(certificate_transfer_out->certificate, sqlite3_column_text(stmt, 1));
+        if (res < 0)
+        {
+            goto out;
+        }
     }
     certificate_transfer_out->new_owner = MAGICNET_key_from_string(sqlite3_column_text(stmt, 2));
     certificate_transfer_out->total_voters = sqlite3_column_int(stmt, 3);
@@ -2176,6 +2344,8 @@ int magicnet_database_load_certificate_no_locks(struct magicnet_council_certific
     certificate_out->signed_data.valid_from = (time_t)sqlite3_column_int64(stmt, 5);
 
     magicnet_database_load_transfer_no_locks(&certificate_out->signed_data.transfer, sqlite3_column_int(stmt, 6));
+    strncpy(certificate_out->hash, sqlite3_column_text(stmt, 7), sizeof(certificate_out->hash));
+
     certificate_out->owner_key = MAGICNET_key_from_string(sqlite3_column_text(stmt, 8));
 
     if (sqlite3_column_blob(stmt, 9))
@@ -2214,7 +2384,7 @@ int magicnet_database_load_blocks(struct vector *block_vec_out, size_t amount)
     int res = 0;
     sqlite3_stmt *stmt = NULL;
     int pos = vector_count(block_vec_out);
-    const char *load_block_sql = "SELECT hash, prev_hash, blockchain_id, transaction_group_hash, key, signature FROM blocks LIMIT ?, ?";
+    const char *load_block_sql = "SELECT hash, prev_hash, blockchain_id, transaction_group_hash, signing_certificate_hash, key, signature FROM blocks LIMIT ?, ?";
     res = sqlite3_prepare_v2(db, load_block_sql, strlen(load_block_sql), &stmt, 0);
     if (res != SQLITE_OK)
     {

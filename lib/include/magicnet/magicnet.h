@@ -305,14 +305,12 @@ struct magicnet_packet
                 } vote_next_verifier;
 
                 /**
-                 * @brief Once this packet is signed and sent your public key
-                 * will be eligible to be voted for to be the next signer of the block
-                 * unless you signup before a block is created you wont be considered.
-                 * You must sign up for every block you wish to sign.
+                 * @brief The verifier with a validate certificate may sign up to sign the next block
                  */
                 struct magicnet_verifier_signup
                 {
-                    // Empty... We will use the key that signed this block.
+                    // The valid council certificate that wishes to sign the next block.
+                    struct magicnet_council_certificate *certificate;
                 } verifier_signup;
 
                 struct magicnet_transaction_send
@@ -479,17 +477,20 @@ struct magicnet_client
     struct magicnet_server *server;
 };
 
-struct magicnet_key_vote
+// This is the network vote structure to vote for the next block creator
+struct magicnet_certificate_vote
 {
-    // THe key who voted
-    struct key vote_from;
-    // The key voted for
-    struct key voted_for;
+    // The certificate that voted for the next block creator
+    struct magicnet_council_certificate* vote_from_cert;
+
+    // The hash of the certificate that was voted for. This is the person who will create the next block.
+    char vote_for_cert_hash[SHA256_STRING_LENGTH];
 };
 
 struct magicnet_vote_count
 {
-    struct key key;
+    // The hash of the certificate
+    char vote_for_cert_hash[SHA256_STRING_LENGTH];
     // The number of voters whome voted for this key.
     size_t voters;
 };
@@ -544,7 +545,7 @@ struct magicnet_server
          */
         struct votes
         {
-            // vector of struct magicnet_key_vote*
+            // vector of struct magicnet_certificate_vote*
             struct vector *votes;
 
             // vector of struct magicnet_vote_count*
@@ -1247,9 +1248,23 @@ int magicnet_council_verify(struct magicnet_council *council);
 
 
 /**
+ * Verifies that the council certificate is owned by the public key of this node
+ * 
+ * \param certificate The certificate to verify
+*/
+bool magicnet_council_certificate_is_mine(const char* certificate_hash);
+
+/**
  * Verifies that a given council certificate signed a particular hash.
 */
 int magicnet_council_certificate_verify_signed_data(struct magicnet_council_certificate *certificate, struct signature* signature, const char* hash);
+
+
+/**
+ * Verifies that the certificate is valid and signed by the owner of the certificate.
+ * Then saves the certificate to the database.
+*/
+int magicnet_council_certificate_save(struct magicnet_council_certificate *certificate);
 
 /**
  * Verifies that the council certificate is valid
@@ -1266,6 +1281,25 @@ void magicnet_council_certificate_free(struct magicnet_council_certificate *cert
 int magicnet_council_certificate_verify_signature(struct magicnet_council_certificate *certificate);
 void magicnet_council_certificate_hash(struct magicnet_council_certificate *certificate, char *out_hash);
 
+/**
+ * Transfeers the council certificate without the need of vote, this is only allowed if the certificate holds the
+ * MAGICNET_COUNCIL_CERTIFICATE_FLAG_TRANSFERABLE_WITHOUT_VOTE flag. Additionally if two certificates become in existance with overlapping
+ * valid from and expiry times then both certificates will become invalidated. This is to prevent a situation where a certificate
+ * is transfered to two people at the same time. Breaking this rule will invalidate the certificates in question when any peer becomes aware of a 
+ * co-existing certificate. 
+ * 
+ * This function will fail in the event the certificate cannot be transfeered due to overlapping times. If you force it programatically all nodes
+ * will reject this certificate for the entire future so please ensure you respect the return result of this function.
+ * 
+*/
+int magicnet_council_certificate_self_transfer(struct magicnet_council_certificate *certificate, struct magicnet_council_certificate** new_certificate_out, struct key *new_owner, time_t valid_from, time_t valid_to);
+
+
+/**
+ * Should be called by anyone who wishes to claim a certificate that has been assigned to them. This function will sign the certificate and ensure
+ * that the certificate is valid. If the certificate is not valid then the function will return an error.
+*/
+int magicnet_council_certificate_self_transfer_claim(struct magicnet_council_certificate* certificate_to_claim);
 /**
  * Returns true if the given certificate is a genesis certificate belonging to the council
 */
@@ -1312,4 +1346,17 @@ void magicnet_transactions_request_set_target_key(struct magicnet_transactions_r
 struct magicnet_wallet *magicnet_wallet_find(struct key *key);
 int magicnet_wallet_calculate_balance(struct key *key, double *balance_out);
 int magicnet_wallet_calculate_balance_from_block(struct key *key, double *balance_out, const char *block_hash);
+
+// Settings
+
+int magicnet_setting_set(const char *key, const char *value);
+int magicnet_setting_set_timestamp(const char *key, time_t value);
+int magicnet_setting_set_int(const char *key, int value);
+
+int magicnet_setting_get_int(const char *key, int *value_out);
+int magicnet_setting_get_timestamp(const char *key, time_t *value_out);
+int magicnet_setting_get(const char *key, char *value_out);
+
+bool magicnet_setting_exists(const char *key);
+
 #endif
